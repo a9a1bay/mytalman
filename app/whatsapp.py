@@ -11,6 +11,18 @@ _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT
 MAX_WHATSAPP_LEN = 1500
 
 
+def _normalize_whatsapp_number(number: str) -> str:
+    """
+    Гарантирует префикс "whatsapp:" и убирает случайные пробелы — это частая
+    причина ошибки Twilio 21910 (Invalid From and To pair), когда номер задан
+    в переменных окружения без префикса или с лишним пробелом по краям.
+    """
+    number = (number or "").strip()
+    if number and not number.startswith("whatsapp:"):
+        number = f"whatsapp:{number}"
+    return number
+
+
 def send_whatsapp_message(to_number: str, body: str) -> None:
     """
     to_number — в формате "whatsapp:+77011234567" (с префиксом whatsapp:)
@@ -19,10 +31,14 @@ def send_whatsapp_message(to_number: str, body: str) -> None:
         print(f"[DRY-RUN, нет Twilio credentials] -> {to_number}: {body}")
         return
 
+    from_number = _normalize_whatsapp_number(TWILIO_WHATSAPP_FROM)
+    to_number = _normalize_whatsapp_number(to_number)
+    print(f"[whatsapp] send from={from_number!r} to={to_number!r}")
+
     chunks = [body[i:i + MAX_WHATSAPP_LEN] for i in range(0, len(body), MAX_WHATSAPP_LEN)] or [""]
     for chunk in chunks:
         _twilio_client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
+            from_=from_number,
             to=to_number,
             body=chunk,
         )
