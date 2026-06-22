@@ -22,6 +22,25 @@ app = FastAPI(title="Ремонт-бот WhatsApp")
 _validator = RequestValidator(TWILIO_AUTH_TOKEN) if TWILIO_AUTH_TOKEN else None
 
 
+def _public_url(request: Request) -> str:
+    """
+    Восстанавливает публичный https-URL запроса.
+
+    Railway (как и большинство облачных платформ) терминирует HTTPS на уровне
+    прокси и передаёт внутрь контейнера обычный HTTP-запрос. Из-за этого
+    request.url у Starlette содержит схему "http://", хотя Twilio подписывал
+    запрос как "https://" — подпись не совпадает, и валидация падает с 403
+    (в Twilio это видно как ошибка 11200 / "Forbidden").
+
+    Чтобы починить это, берём настоящую схему и хост из заголовков
+    X-Forwarded-Proto / X-Forwarded-Host, которые прокси Railway всегда
+    проставляет, и пересобираем URL на их основе.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    return f"{proto}://{host}{request.url.path}"
+
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "bot": BOT_NAME}
@@ -34,7 +53,7 @@ async def whatsapp_webhook(request: Request):
 
     if VALIDATE_TWILIO_SIGNATURE and _validator is not None:
         signature = request.headers.get("X-Twilio-Signature", "")
-        url = str(request.url)
+        url = _public_url(request)
         if not _validator.validate(url, params, signature):
             raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
