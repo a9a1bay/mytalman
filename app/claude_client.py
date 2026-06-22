@@ -135,7 +135,7 @@ def get_bot_response(history: List[Dict[str, str]]) -> Tuple[str, Optional[Dict]
     escalation: Optional[Dict] = None
     final_text = ""
 
-    for _ in range(MAX_TOOL_ITERATIONS):
+    for iteration in range(MAX_TOOL_ITERATIONS):
         response = _client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
@@ -147,6 +147,11 @@ def get_bot_response(history: List[Dict[str, str]]) -> Tuple[str, Optional[Dict]
         tool_uses = [block for block in response.content if block.type == "tool_use"]
         text_parts = [block.text for block in response.content if block.type == "text"]
         final_text = "\n".join(text_parts).strip()
+
+        print(
+            f"[claude_client] iter={iteration} stop_reason={response.stop_reason} "
+            f"tool_names={[tu.name for tu in tool_uses]} text_len={len(final_text)}"
+        )
 
         if not tool_uses:
             # Модель ответила обычным текстом без инструментов — диалог на этом шаге закончен
