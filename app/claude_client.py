@@ -110,6 +110,9 @@ TOOLS = [
 ]
 
 
+MAX_TOOL_ITERATIONS = 5  # защита от бесконечного цикла, если модель будет постоянно звать инструменты
+
+
 def get_bot_response(history: List[Dict[str, str]]) -> Tuple[str, Optional[Dict], Optional[Dict]]:
     """
     Отправляет историю диалога в Claude, возвращает:
@@ -117,35 +120,44 @@ def get_bot_response(history: List[Dict[str, str]]) -> Tuple[str, Optional[Dict]
     - данные лида (dict | None), если модель вызвала save_lead_info,
     - данные эскалации (dict | None), если модель вызвала escalate_to_human.
 
-    Если модель вызвала инструмент(ы), мы делаем второй проход, чтобы получить
-    финальный текстовый ответ для клиента (модель видит результат tool_use и пишет текст).
+    Модель может вызывать инструменты несколько раз подряд (например, сначала
+    save_lead_info, а на следующем шаге ещё и escalate_to_human, и только потом
+    дать финальный текст). Поэтому здесь не два фиксированных вызова, а цикл:
+    на каждом шаге собираем все tool_use, выполняем их, отдаём результат модели
+    и продолжаем, пока она не ответит обычным текстом без вызова инструментов
+    (или пока не упрёмся в лимит итераций — на этот случай отдаём клиенту
+    осмысленный текст вместо вечной заглушки "отвечу через минуту").
     """
     system_prompt = _build_system_prompt()
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
-    response = _client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        tools=TOOLS,
-        messages=messages,
-    )
+    lead_patch: Optional[Dict] = None
+    escalation: Optional[Dict] = None
+    final_text = ""
 
-    lead_patch = None
-    escalation = None
-    text_parts = []
+    for _ in range(MAX_TOOL_ITERATIONS):
+        response = _client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=MAX_TOKENS,
+            system=system_prompt,
+            tools=TOOLS,
+            messages=messages,
+        )
 
-    tool_uses = [block for block in response.content if block.type == "tool_use"]
-    for block in response.content:
-        if block.type == "text":
-            text_parts.append(block.text)
+        tool_uses = [block for block in response.content if block.type == "tool_use"]
+        text_parts = [block.text for block in response.content if block.type == "text"]
+        final_text = "\n".join(text_parts).strip()
 
-    if tool_uses:
-        # Собираем результаты инструментов и просим модель сформулировать финальный ответ
+        if not tool_uses:
+            # Модель ответила обычным текстом без инструментов — диалог на этом шаге закончен
+            break
+
         tool_results = []
         for tu in tool_uses:
             if tu.name == "save_lead_info":
-                lead_patch = tu.input
+                # Если модель вызвала save_lead_info несколько раз за диалог — берём
+                # последние значения, но не теряем уже накопленные поля из прошлых шагов
+                lead_patch = {**(lead_patch or {}), **tu.input}
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,
@@ -158,21 +170,23 @@ def get_bot_response(history: List[Dict[str, str]]) -> Tuple[str, Optional[Dict]
                     "tool_use_id": tu.id,
                     "content": "Менеджер уведомлён, подключится в ближайшее время.",
                 })
+            else:
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": "Инструмент выполнен.",
+                })
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
-        followup = _client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=MAX_TOKENS,
-            system=system_prompt,
-            tools=TOOLS,
-            messages=messages,
-        )
-        text_parts = [block.text for block in followup.content if block.type == "text"]
-
-    final_text = "\n".join(text_parts).strip()
     if not final_text:
-        final_text = "Секунду, уточняю информацию — отвечу через минуту."
+        # Сюда попадаем только если за все итерации модель ни разу не вернула текст
+        # (например, упёрлись в MAX_TOOL_ITERATIONS) — отвечаем клиенту по-человечески,
+        # а не оставляем его без ответа навсегда
+        final_text = (
+            "Уточняю детали по вашему вопросу, скоро вернусь с ответом. "
+            "Если это срочно — просто напишите ещё раз, и я подключу менеджера."
+        )
 
     return final_text, lead_patch, escalation
